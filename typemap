@@ -1,0 +1,9 @@
+TYPEMAP
+DECODER_RING *	T_DECODER_RING
+MD5_CTX *	O_OBJECT
+RC4_KEY *	O_OBJECT
+
+
+INPUT
+T_DECODER_RING
+	$var = get_decoder_ring($arg)

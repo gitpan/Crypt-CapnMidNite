@@ -1,0 +1,7 @@
+Crypt::CapnMidNite
+
+Perl interface to MD5, RC4, and modified asymetric RC4 
+encryption/decryption methods. The module is named for its 
+functionality as a swiss army knife of encode/decode, hash 
+methods or... in the old days, the Captain Midnight Decoder Ring.
+

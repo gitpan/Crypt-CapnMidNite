@@ -1,0 +1,546 @@
+#include "EXTERN.h"
+#include "perl.h"
+#include "XSUB.h"
+#include <time.h>
+#include "capnmidnite.h"
+
+#define	F_NEW		0
+#define	F_DO_MD5	1
+#define	F_DO_RC4	2
+#define	F_DO_MD5_RC4	3
+#define	F_DO_CRYPT	4
+#define	F_DO_MD5_CRYPT	5
+#define F_DECODE	6
+
+static DECODER_RING *
+get_decoder_ring (SV* sv)
+{
+	if (sv_derived_from(sv, "Crypt::My_Module"))
+		return (DECODER_RING *)SvIV(SvRV(sv));
+	croak("Not a reference to a Crypt::My_Module object");
+	return (DECODER_RING *)0; /* some compilers insist on a return value */
+}
+
+void
+rotright(unsigned char * d, STRLEN len, unsigned char mode, unsigned char type)
+{
+	if (( mode == F_DO_CRYPT || mode == F_DO_MD5_CRYPT ||
+		mode == F_DECODE )
+#if Crypt_ENCODE
+		&& ! type
+#endif
+	) {
+		STRLEN c;
+		for(c=0; c<len; c++) {
+			if(d[c] & 0x01) {
+				d[c] >>= 1;
+				d[c] |= 0x80;
+			} else {
+				d[c] >>= 1;
+	}	}	}
+}
+
+
+void
+rotleft(unsigned char * d, STRLEN len, unsigned char mode, unsigned char type)
+{
+#if Crypt_ENCODE
+	if (( mode == F_DO_CRYPT || mode == F_DO_MD5_CRYPT ) && type ) {
+		STRLEN c;
+		for(c=0; c<len; c++) {
+			if(d[c] & 0x80) {
+				d[c] <<= 1;
+				d[c] |= 0x01;
+			} else {
+				d[c] <<= 1;
+	}	}	}
+#endif
+}
+
+unsigned char *
+init_md5(unsigned char * keyd,STRLEN * klen,DECODER_RING * dRing)
+{
+	MD5Init(dRing->ctx);
+	MD5Update(dRing->ctx, keyd, *klen);
+	MD5Final(dRing->digeststr, dRing->ctx);
+	*klen = 16;
+	return dRing->digeststr;
+}
+
+void
+init_hash_xy(unsigned char * keyd,STRLEN * klen,DECODER_RING * dRing)
+{
+	short count;
+	dRing->hashx = 0;
+	dRing->hashy = 0;
+	for ( count = 0; count < *klen; count++ ) {
+		dRing->hashx = (dRing->hashx + keyd[count++]) % 256;
+		if(count >= *klen)
+			break;
+		dRing->hashy = (dRing->hashy + keyd[count]) % 256;
+	}
+    /* reset the rc4 key pointer starting point */
+	dRing->Rc4KeyG1->x = dRing->hashx;
+	dRing->Rc4KeyG1->y = dRing->hashy;
+}
+
+unsigned char
+hexnibble(unsigned char byte)
+{
+	if( byte > 0x39 )
+		byte -= 7;
+	byte &= 0xF;
+	return byte;
+}
+
+typedef PerlIO* InputStream;
+typedef PerlIO* OutputStream;
+
+MODULE = Crypt::My_Module	PACKAGE = Crypt::My_Module
+
+PROTOTYPES: DISABLE
+
+
+# call as:
+#	new_md5		md5 only
+#	new_rc4		rc4 setup
+#	new_md5_rc4	md5+rc4 setup
+#	new_crypt	rc4 setup, + hash, rot setup
+#	new_md5_crypt	md5+rc4 setup, + hash, rot setup
+#	decode		md5+rc4 setup, + hash, rot setup + decrypt
+
+void
+new(CLASS,...)
+	SV * CLASS
+    ALIAS:
+	Crypt::My_Module::new		 = F_NEW
+	Crypt::My_Module::new_md5	 = F_DO_MD5
+	Crypt::My_Module::new_rc4	 = F_DO_RC4
+	Crypt::My_Module::new_md5_rc4	 = F_DO_MD5_RC4
+	Crypt::My_Module::new_crypt	 = F_DO_CRYPT
+	Crypt::My_Module::new_md5_crypt = F_DO_MD5_CRYPT
+	Crypt::My_Module::decode	 = F_DECODE
+    PREINIT:
+	DECODER_RING * secret_ring;
+	unsigned char * keyd;
+	STRLEN klen;
+	STRLEN * klp;
+	unsigned char *	msg;
+	STRLEN	msg_len;
+        SV *	output;
+	short count;
+    PPCODE:
+# allocate memory or fail
+	if(!SvROK(CLASS)) {
+		STRLEN my_na;
+		char *sclass = SvPV(CLASS, my_na);
+		New(121, secret_ring, 1, DECODER_RING);
+		if( secret_ring == NULL ) {
+			warn("unable to allocate key buffer");
+			XSRETURN_UNDEF;
+		}
+		ST(0) = sv_newmortal();
+		sv_setref_pv(ST(0), sclass, (void *)secret_ring);
+/*		SvREADONLY_on(SvRV(ST(0)));
+*/
+		New(122, secret_ring->Rc4KeyG1, 1, RC4_KEY);
+		if( secret_ring->Rc4KeyG1 == NULL ) {
+			warn("unable to allocate K1");
+			safefree( (DECODER_RING*)secret_ring );
+			XSRETURN_UNDEF;
+		}
+		New(123, secret_ring->ctx, 1,MD5_CTX);
+		if( secret_ring->ctx == NULL ) {
+			warn("unable to allocate ctx");
+			safefree( (RC4_KEY *)secret_ring );
+			safefree( (DECODER_RING*)secret_ring );
+			XSRETURN_UNDEF;
+		}
+	} else {
+		secret_ring = get_decoder_ring (CLASS);
+	}
+# save operating mode for valid methods used later
+	if(ix) {
+		secret_ring->mode = ix;
+	} else {
+		secret_ring->mode = F_DO_MD5;
+	}
+
+	if ( secret_ring->mode != F_DO_MD5 ) {
+		if( items < 2 )
+			croak("missing key for My_Module->newXX");
+
+		if ( ix == F_DECODE  && items < 3 )
+				croak("missing data for My_Module->decode");
+		keyd = (unsigned char *)SvPV(ST(1), klen);
+		klp = &klen;
+	}
+	switch(ix) {
+
+	case F_NEW:
+	case F_DO_MD5:
+		MD5Init(secret_ring->ctx);
+		break;
+
+	case F_DO_MD5_RC4:
+	case F_DO_MD5_CRYPT:
+	case F_DECODE:
+		keyd = init_md5((unsigned char *)keyd,(STRLEN *)klp,(DECODER_RING *)secret_ring);
+
+	case F_DO_RC4:
+	case F_DO_CRYPT:
+		prep_key((unsigned char *)keyd,klen,(RC4_KEY*)secret_ring->Rc4KeyG1);
+		break;
+
+	default:
+		croak("undefined mode (%d) in My_Module", ix);
+		break;
+	}
+
+# complex decode, tweak decoder starting point
+	if( ix == F_DO_CRYPT || ix == F_DO_MD5_CRYPT || ix == F_DECODE ) {
+		init_hash_xy((unsigned char *)keyd,(STRLEN *)klp,(DECODER_RING *)secret_ring);
+	}
+
+# $bu->new_md5_crypt(key)->decrypt(msg)
+	if( ix == F_DECODE ) {
+		msg = (unsigned char *) SvPV(ST(2), msg_len);
+		rotright((unsigned char *)msg, msg_len,secret_ring->mode,0);
+		rc4((unsigned char *)msg, msg_len, (RC4_KEY *)secret_ring->Rc4KeyG1);
+
+		if (output == &PL_sv_undef)
+		    output = sv_newmortal();
+
+		output = newSVpv(msg, msg_len);
+/*		ST(0) = output;
+*/	}
+
+	XSRETURN(1);
+
+
+int
+x(self,...)
+    SV * self
+    ALIAS:
+	Crypt::My_Module::x	= 0
+	Crypt::My_Module::y	= 1
+	Crypt::My_Module::hx	= 2
+	Crypt::My_Module::hy	= 3
+    PREINIT:
+	DECODER_RING * secret_ring = get_decoder_ring(self);
+	IV val;
+    CODE:
+	switch( ix ) {
+		case 0:
+			RETVAL = secret_ring->Rc4KeyG1->x;
+			break;
+		case 1:
+			RETVAL = secret_ring->Rc4KeyG1->y;
+			break;
+		case 2:
+			RETVAL = secret_ring->hashx;
+			break;
+		case 3:
+			RETVAL = secret_ring->hashy;
+			break;
+		default:
+			croak("undefined mode (%d) in My_Module", ix);
+			break;
+	}
+	if ( items > 1 ) {
+		val = SvIV(ST(1));
+		switch( ix ) {
+		case 0:
+			secret_ring->Rc4KeyG1->x = val;
+			break;
+		case 1:
+			secret_ring->Rc4KeyG1->y = val;
+			break;
+		}
+	}
+    OUTPUT:
+	RETVAL
+
+
+#define F_DIGEST	0
+#define F_HEX_DIGEST	1
+#define F_B64_DIGEST	2
+#define F_MD5		3
+#define F_MD5_HEX	4
+#define F_MD5_B64	5
+
+void
+digest(self,...)
+	SV * self
+    ALIAS:
+	Crypt::My_Module::digest	= F_DIGEST
+	Crypt::My_Module::hexdigest	= F_HEX_DIGEST
+	Crypt::My_Module::b64digest	= F_B64_DIGEST
+	Crypt::My_Module::md5		= F_MD5
+	Crypt::My_Module::md5_hex	= F_MD5_HEX
+	Crypt::My_Module::md5_base64	= F_MD5_B64
+    PREINIT:
+	DECODER_RING * secret_ring = get_decoder_ring(self);
+	unsigned char * data;
+	STRLEN len;
+	STRLEN i;
+    PPCODE:
+	if ( ix == F_MD5 || ix == F_MD5_HEX || ix == F_MD5_B64) {
+		if( secret_ring->mode != F_DO_MD5 )
+			croak("invalid method, md5 add not initialized");
+		if( items < 2 ) 
+			croak("md5 data argument missing");
+
+		for( i = 1; i < items; i++ ) {
+			data = (unsigned char *)(SvPV(ST(i), len)); 
+			MD5Update(secret_ring->ctx, data, len);
+
+		}
+	}
+
+	switch(ix) {
+
+	case F_MD5:
+	case F_DIGEST:
+		if( secret_ring->mode == F_DO_MD5 )
+			MD5Final(secret_ring->digeststr, secret_ring->ctx);
+
+		ST(0) = sv_2mortal(newSVpv(secret_ring->digeststr,16));
+
+		if( secret_ring->mode == F_DO_MD5 )
+			MD5Init(secret_ring->ctx);
+		break;
+
+	case F_MD5_HEX:
+	case F_HEX_DIGEST:
+		if( secret_ring->mode == F_DO_MD5 )
+			MD5Final(secret_ring->digeststr, secret_ring->ctx);
+		hex_16((unsigned char *)secret_ring->digeststr,(unsigned char *)secret_ring->result);
+		ST(0) = sv_2mortal(newSVpv(secret_ring->result,0));
+
+		if( secret_ring->mode == F_DO_MD5 )
+			MD5Init(secret_ring->ctx);
+		break;
+
+	case F_MD5_B64:
+	case F_B64_DIGEST:
+		if( secret_ring->mode == F_DO_MD5 )
+			MD5Final(secret_ring->digeststr, secret_ring->ctx);
+		base64_16((unsigned char *)secret_ring->digeststr,(unsigned char *)secret_ring->result);
+		ST(0) = sv_2mortal(newSVpv(secret_ring->result,0));
+
+		if( secret_ring->mode == F_DO_MD5 )
+			MD5Init(secret_ring->ctx);
+		break;
+
+	default:
+		croak("undefined parameter (%d) in My_Module", ix);
+		break;
+	}
+	XSRETURN(1);
+
+
+void
+add(self, ...)
+	SV * self
+    PREINIT:
+	unsigned char *data;
+	STRLEN len;
+	DECODER_RING * secret_ring;
+	STRLEN i;
+    PPCODE:
+	secret_ring = get_decoder_ring(self);
+	if( secret_ring->mode != F_DO_MD5 )
+		croak("invalid method, md5 add not initialized");
+	if( items < 2 ) 
+		croak("md5 data argument missing");
+
+	for( i = 1; i < items; i++ ) {
+		data = (unsigned char *)(SvPV(ST(i), len)); 
+		MD5Update(secret_ring->ctx, data, len);
+
+	}
+
+	XSRETURN(1);	/* secret_ring */
+
+
+void
+addfile(self, fh)
+	SV * self
+	InputStream fh
+    PREINIT:
+	DECODER_RING * secret_ring;
+	STRLEN fill;
+	STRLEN missing;
+	unsigned char buffer[4096];
+	STRLEN n;
+    CODE:
+	secret_ring = get_decoder_ring(self);
+	fill = secret_ring->ctx->bytes_low & 0x3F;
+	missing  = 64 - fill;
+	if( secret_ring->mode != F_DO_MD5 )
+		croak("invalid method, md5 addfile not initialized");
+	if (fill) {
+		/* The MD5Update() function is faster if it can work with
+		 * complete blocks.  This will fill up any buffered block
+		 * first.
+		 */
+		if ((n = PerlIO_read(fh, buffer, missing))) {
+			MD5Update(secret_ring->ctx, buffer, n);
+		} else {
+			XSRETURN(1);    /* self */
+		}
+	}
+	/* Process blocks until EOF */
+	while ( (n = PerlIO_read(fh, buffer, sizeof(buffer)))) {
+		MD5Update(secret_ring->ctx, buffer, n);
+	}
+	XSRETURN(1);    /* secret_ring */
+
+
+void
+crypt_fileIO(self,inH,outH)
+	SV * self
+	InputStream inH
+	OutputStream outH
+    ALIAS:
+	Crypt::My_Module::encrypt_fileIO = 1
+    PREINIT:
+	DECODER_RING * secret_ring;
+	unsigned char buffer[4096];
+	STRLEN n;
+    CODE:
+	secret_ring = get_decoder_ring(self);
+	if( secret_ring->mode == F_DO_MD5 )
+		croak("invalid method, crypt not initialized");
+	while ( (n = PerlIO_read(inH, buffer, sizeof(buffer)))) {
+		rotright(buffer, n,secret_ring->mode,ix);
+		rc4(buffer, n, (RC4_KEY *)secret_ring->Rc4KeyG1);
+		rotleft(buffer, n,secret_ring->mode,ix);
+		PerlIO_write(outH, buffer, n);
+	}
+	XSRETURN(1);	/* secret_ring */
+
+
+void
+crypt(self,...)
+	SV * self
+    ALIAS:
+	Crypt::My_Module::encrypt = 1
+    PREINIT:
+	DECODER_RING * secret_ring;
+	SV *	output;
+	unsigned char *	msg;
+	STRLEN	msg_len;
+    PPCODE:
+	secret_ring = get_decoder_ring(self);
+	msg = (unsigned char *) SvPV(ST(1), msg_len);
+	rotright((unsigned char *)msg, msg_len,secret_ring->mode,ix);
+	rc4((unsigned char *)msg, msg_len, (RC4_KEY *)secret_ring->Rc4KeyG1);
+	rotleft((unsigned char *)msg, msg_len,secret_ring->mode,ix);
+
+	if (output == &PL_sv_undef)
+	    output = sv_newmortal();
+
+	output = newSVpv(msg, msg_len);
+	ST(0) = output;
+	XSRETURN(1);
+
+
+void
+license(self,...)
+	SV * self
+    PREINIT:
+	DECODER_RING * secret_ring;
+	SV *	output;
+	unsigned char * data;
+	unsigned char * dend;
+	unsigned char * out;
+	time_t now;
+	IV expire;
+	STRLEN len;
+	STRLEN i;
+    PPCODE:
+	secret_ring = get_decoder_ring(self);
+	if( secret_ring->mode != F_DO_MD5 )
+		croak("invalid method, license not initialized");
+
+	if( items < 4 ) 
+		croak("license argument(s) missing");
+
+ # md5 is initialized, process the md5 digest of the input text string
+	for( i = 1; i < items -2; i++ ) {
+		data = (unsigned char *)(SvPV(ST(i), len)); 
+		MD5Update(secret_ring->ctx, data, len);
+	}
+
+ # add the expire nibble
+	expire = SvIV(ST(i));
+	data = (unsigned char *)(SvPV(ST(i), len));
+	i++;
+	time(&now);
+
+ # return now if expired
+	if( expire < now && expire != 0 ) {
+ # set data to empty string
+		sv_setsv(ST(i+1),&PL_sv_undef);
+		XSRETURN_UNDEF;
+	} else if ( expire == 0 )
+		expire = now;
+	else
+		expire = expire - now;
+
+ # complete the md5 of input info
+	MD5Update(secret_ring->ctx, data, len);
+	MD5Final(secret_ring->digeststr, secret_ring->ctx);
+
+ # initialize decryption with md5 of input which is now in digeststr
+	len = 16;
+	prep_key((unsigned char *)secret_ring->digeststr,len,(RC4_KEY*)secret_ring->Rc4KeyG1);
+	init_hash_xy((unsigned char *)secret_ring->digeststr,(STRLEN *)&len,(DECODER_RING *)secret_ring);
+
+ # data should be hex key, convert to binary and stash in digeststr
+	data = (unsigned char *)(SvPV(ST(i), len));
+	i++;
+	if( len != 32 )
+		croak("bad size, key should be 32 characters");
+
+	dend = data + 32;
+	out = secret_ring->digeststr;
+	while(data < dend) {
+		*out = hexnibble(*data++) << 4;		
+		*out++ |= hexnibble(*data++);
+	}	
+
+ # set special mode
+	secret_ring->mode = F_DO_CRYPT;
+
+ # decrypt key string string
+	len = 16;
+
+	rotright((unsigned char *)secret_ring->digeststr,len,secret_ring->mode,0);
+	rc4((unsigned char *)secret_ring->digeststr,len,(RC4_KEY *)secret_ring->Rc4KeyG1);
+
+ # prep decrypt with original key
+	prep_key((unsigned char *)secret_ring->digeststr,len,(RC4_KEY*)secret_ring->Rc4KeyG1);
+	init_hash_xy((unsigned char *)secret_ring->digeststr,(STRLEN *)&len,(DECODER_RING *)secret_ring);
+
+ # THIS SECTION was eliminated in favor of calling the 'crypt' routine above
+ # to facilitate using smaller blocks of data on a repeating basis
+ #
+ # decrypt target data stream
+ #	data = (unsigned char *)(SvPV(ST(i), len));
+ #	rotright((unsigned char *)data,len,secret_ring->mode,0);
+ #	rc4((unsigned char *)data,len,(RC4_KEY *)secret_ring->Rc4KeyG1);
+
+	ST(0) = sv_2mortal(newSViv(expire));
+	XSRETURN(1);	/* self */
+
+
+void
+DESTROY(secret_ring)
+	DECODER_RING * secret_ring
+    CODE:
+	Safefree( (RC4_KEY*)secret_ring->Rc4KeyG1 );
+	Safefree( (MD5_CTX*)secret_ring->ctx );
+	Safefree( (char*)secret_ring );

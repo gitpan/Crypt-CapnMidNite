@@ -1,0 +1,36 @@
+#!/usr/bin/perl
+#
+package Crypt::makesource;
+my $VERSION = '2.01';	# 9-22-02 michael@bizsystems.com
+
+use strict;
+use diagnostics;
+
+my ($name,$src) = @ARGV;
+my $trgt = $name . '.xs';
+
+my $encode = ( $name =~ /LockTite/ );
+
+open(S,$src) or die "could not open $src: $!";
+open(T,">$trgt") or die "could not open $trgt: $!";
+
+print T << "EOF";
+/* This source file is for the Crypt::$name extension to perl.
+ *
+ * It was generated automatically by 'makesource' version $VERSION
+ * from the contents of:
+ *	"$src".
+ * Don't edit this file, edit $src instead.
+ *
+ * 	ANY CHANGES MADE HERE WILL BE LOST!
+ */
+EOF
+
+print T "#define Crypt_ENCODE 1\n" if $encode;
+
+while(<S>) {
+  $_ =~ s/My_Module/$name/g;
+  print T $_;
+}
+close S;
+close T;

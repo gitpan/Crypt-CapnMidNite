@@ -1,0 +1,75 @@
+Revision history for Perl extension Crypt::CapnMidNite
+
+1.00  Sun Sep 22 16:15:16 PDT 2002
+	changed group name to 'Crypt'
+	revised Makefile to write 'name'
+
+0.15  Wed Jan 17 13:04:55 PST 2001
+	Revised the operation of 'license' so that the 'license' method
+	call only sets up the decryption key and returns expiration.
+	Decryption is handled with the standard calls to 'crypt' or
+	decrypt_fileIO.
+	Removed unneed 'use AutoLoad';
+
+0.14  Tue Jan  9 19:09:48 PST 2001
+	license modified to return time remaining until expiration,
+	or undef on failure. now() is returned if no expiration.
+
+0.13  Tue Dec 26 18:36:29 PST 2000
+	license now correctly returns a pointer to self
+	and sets data to 'undef' on error
+
+0.12  Sat Dec 23 21:21:21 PST 2000
+	add method 'license'
+
+0.11  Sat Dec  2 15:22:51 PST 2000
+	Corrected bug in decode portion of 'new' that affected
+	correct operation of rot right/left for C_LockTite
+
+0.10  Fri Dec  1 10:44:00 PST 2000
+	update documentation
+	Removed unneeded iteration on 'crypt', array input data
+	is not acceptable to rc4 as it is in md5.
+	Added decode function for Loader.pm
+
+0.09  Mon Nov 27 21:39:04 PST 2000
+	updated documentation
+	add alias decrypt_fileIO
+
+0.08  Thu Oct 26 12:34:44 PDT 2000
+	Corrected typemap
+
+0.07  Tue Oct 24 19:48:39 PDT 2000
+	Corrected some typos in the documentation
+
+	Turned off 'use warnings' since it causes problems
+	when this is imported into other modules
+
+0.06  Tue Oct 24 15:45:36 PDT 2000
+	Integrated C_LockTite and CapnMidNite into a common
+	set of sources, altered by a single variable change
+	in the Makefile.PL
+
+	Completed documentation.
+
+0.05	Skipped
+
+0.04  Sat Oct 21 00:46:00 2000
+	inlined 'swap_byte' in rc4 to increase performance.
+
+	Removed second crypt operation.
+
+0.03  Sat Oct 21 00:01:00 2000
+	added 'name' to test files so that both
+	CapnMidNite and LockTite can use the same files.
+
+0.02  Fri Oct 20 18:09:29 2000
+        changed file-decode.t to use files instead of pipes
+        so this works with older versions of perl
+
+        removed 'our' variable types for same reason
+
+0.01  Wed Oct  4 13:58:29 2000
+	- original version; created by h2xs 1.20 with options
+		-cn CapnMidNite
+
